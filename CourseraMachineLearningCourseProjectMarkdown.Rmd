@@ -1,0 +1,149 @@
+---
+title: "Coursea Machine Learning Course Project"
+author: "Chimi"
+date: "August 4, 2017"
+output: html_document
+---
+
+##Background:
+Subjects were asked to perform a series of five activites (A-E)  wearing motion tracking technology.  These pieces of technology captured measurements of the subjects movement in the x, y, and z directions.
+
+##Objective: 
+Develop a prediction model using data provided, classifies unknown movements into the appropriate category (A-E).
+ 
+###Data Source: 
+Kindly provided by and available at the below links.
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+```{r}
+# Import Data
+TrainData <- read.csv("pml-training.csv", header = TRUE)
+TestData <- read.csv("pml-testing.csv", header = TRUE)
+```
+
+##Approach:
+To develop the prediction model, I undertook a series of steps including:
+    
+    1. Understand the training data set
+    2. Clean and standardize the data set for the modeling
+    3. Perform the same transformations on the Test set to ensure compatibility
+    4. Train model on training set
+    5. Assess model fit
+
+### 1. Understand data set
+The original data set had 160 variables and 19,622 observations.  
+
+The first couple of fields identified the transactions and basic information about them.  The last field is the "classe"" variable, which denotes the classification for the activity on that row.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Libraries
+#For Analysis
+library(caret)
+library(plyr)
+library(tidyr)
+library(dplyr)
+library(randomForest)
+
+# Parallel Processing Setup *** Thanks mentors!!!
+library(parallel)
+library(doParallel)
+
+summary(TrainData)
+str(TrainData)
+```
+There are many data fields populated inconsistently and will need to be cleaned up prior to fitting the model. Additionally, there are a lot of records in the data set so it was split into a smaller training set of 50% the size to speed model function. 
+
+```{r}
+#Split Training Set into Training and Validation
+inValidation <- createDataPartition(y=TrainData$classe, p = .50, list = FALSE)
+l1_TrainData <- TrainData[-inValidation,]
+l1_ValidData <- TrainData[inValidation,]
+```
+### 2. Clean and standardize the data set for the modeling
+The measurement fields, contains two types of fields - original measurements and calculated values. The calculated values were identified by the prefixes on the column names as below: 
+```{r}
+## Limit Data Set to columns with original values (i./e. not summarized values)
+Variables <- names(l1_TrainData) # save all the variables in a list
+measurements <- (names(l1_TrainData)) # save all the variables in a list
+Std_measurements <- grep("stddev",measurements, value = TRUE)
+avg_measurements <- grep("avg",measurements, value = TRUE)
+max_measurements <- grep("max",measurements, value = TRUE)
+min_measurements <- grep("min",measurements, value = TRUE)
+total_measurements <- grep("total",measurements, value = TRUE)
+var_measurements <- grep("var",measurements, value = TRUE)
+kurtosis_measurements <- grep("kurtosis",measurements, value = TRUE)
+raw_measurements <- grep("raw",measurements, value = TRUE)
+user_measurements <- grep("user",measurements, value = TRUE)
+
+inapplicable_measurements <- c(Std_measurements, avg_measurements, max_measurements, min_measurements,total_measurements,
+                                var_measurements, kurtosis_measurements, raw_measurements, user_measurements)
+
+l1_TrainData_MeasurementsOnly <- l1_TrainData[,-which(names(l1_TrainData) %in% inapplicable_measurements)]
+```
+Many of the variables present in the dataset had minimal value because they were populated inconsistently, or so sproadically across the data to not have much predicitve power. These were identified below:
+```{r}
+## Remove variables with little to no distinguishing data
+low_data_measurements <- c("new_window", "cvtd_timestamp", "num_window","skewness_yaw_belt", "amplitude_yaw_belt", 
+                           "skewness_yaw_dumbbell", "amplitude_yaw_dumbbell","skewness_yaw_forearm", "amplitude_yaw_forearm")
+
+l1_TrainData_Clean <- l1_TrainData_MeasurementsOnly[,-which(names(l1_TrainData_MeasurementsOnly) %in% low_data_measurements)]
+```
+Next, some of the data in the Test Set, did not have any values populated.  Because they could not be relied on for prediciting, they were removed from the Training Set. Finally, the data sets had NA's which present problems for the caret package.  Since these values were uniform (i.e. all NA), an assumption was made and zeroes were populated for all these values.
+```{r}
+## Remove variables with no measurements in test set
+not_in_test_data <- c('skewness_roll_belt',    'skewness_roll_belt.1','skewness_roll_arm', 'skewness_pitch_arm',
+                      'skewness_yaw_arm', 'skewness_roll_dumbbell', 'skewness_pitch_dumbbell', 'skewness_roll_forearm',
+                      'skewness_pitch_forearm')
+
+l1_TrainData_Clean[is.na(l1_TrainData_Clean)] <- 0  # Remove NAs for Caret Package
+TrainData_ForFitting <- l1_TrainData_Clean[,-which(names(l1_TrainData_Clean) %in% not_in_test_data)]
+```
+### 3. Perform the same transformations on the Test set to ensure compatibility
+To make sure the test and training set looked the same (and because they were provided in two files, rather than one and split), the transformations performed on the Training Set were also performed on the Test Set. Next, the data types were checked to make sure they were the same between the Test and Training sets after transformations. 
+```{r}
+# Update Test Set
+TestData_MeasurementsOnly <- TestData[,-which(names(TestData) %in% inapplicable_measurements)]
+TestData_Clean <- TestData_MeasurementsOnly[,-which(names(TestData_MeasurementsOnly) %in% low_data_measurements)]
+TestData_Clean[is.na(TestData_Clean)] <- 0 # Remove NAs for Caret Package
+TestData_ForFitting <- TestData_Clean[,-which(names(TestData_Clean) %in% not_in_test_data)]
+
+## Some don't match - Change to numeric from int
+TestData_ForFitting$magnet_dumbbell_z <- as.numeric(TestData_ForFitting$magnet_dumbbell_z)
+TestData_ForFitting$magnet_forearm_y  <- as.numeric(TestData_ForFitting$magnet_forearm_y)
+TestData_ForFitting$magnet_forearm_z  <- as.numeric(TestData_ForFitting$magnet_forearm_z)
+```
+### 4. Train Model
+I decided to use the randomforest method from the caret package. This package allowed for the classification of categorical variables as opposed to other predicitive models that estimate a numeric value.  
+
+To train the model and have it perform in a reasonable amount of time, I leveraged the advice from Mentor Len and used parallel processing. Then I updated the parameters to control the training process and trained the model using Cross Validation.
+```{r}
+## Parallel Processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+## Train Control Paramters for parallel processing < From Mentor notes in forum > 
+fitControl <- trainControl(method = "cv", # Cross validation method
+                           number = 10,
+                           allowParallel = TRUE, # enables the parallel processing noted above
+                           verboseIter = TRUE) #enables progress tracking of model training
+
+## Train Model
+mod_Train_rf <- train(y = factor(TrainData_ForFitting$classe),
+                      x = TrainData_ForFitting[,2:58], #excludes the row ID and the classe variable 
+                      family = "rf",
+                      trControl = fitControl)
+```
+### 6. Assess model fit
+The final step was assessing the model fit.
+```{r}
+mod_Train_rf$finalModel
+confusionMatrix.train(mod_Train_rf)
+plot(mod_Train_rf$finalModel)
+```
+From the plot, the number of trees over about 100, did not help to reduce the error rate.  In future fittings, I'd reduce the number of trees to improve execution time.
